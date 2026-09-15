@@ -1,0 +1,12 @@
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+
+# ML service
+ml-service/venv/
+ml-service/__pycache__/
+ml-service/.env
+
+# OS
+.DS_Store
