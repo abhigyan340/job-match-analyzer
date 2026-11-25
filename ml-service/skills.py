@@ -1,9 +1,11 @@
 """
-Pure-Python skill utilities: normalization, matching, and score computation.
+Pure-Python skill utilities: normalization, matching, score computation,
+and rewrite-suggestion validation.
 No network calls, no ML libraries — safe to unit-test in isolation.
 """
 
 import re
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Skill taxonomy (fallback when Gemini is unavailable)
@@ -185,3 +187,97 @@ def compute_overall_score(
     weighted_sum = sum(score * (weight / total_weight) for score, weight in available)
 
     return round(weighted_sum, 1)
+
+
+# ---------------------------------------------------------------------------
+# Rewrite-suggestion helpers
+# ---------------------------------------------------------------------------
+
+# Max characters for the suggested rewrite and its reason (keeps cards readable)
+_MAX_SUGGESTION_CHARS = 300
+
+# Collapse all whitespace runs and strip before comparing, so minor formatting
+# differences between the LLM's copy and the original text don't cause misses.
+def _normalize_whitespace(text: str) -> str:
+    return " ".join(text.split()).lower()
+
+
+def verify_original(original: str, resume_text: str) -> bool:
+    """
+    Return True if `original` (a bullet or line the LLM claims to have copied
+    from the resume) actually appears in `resume_text`.
+
+    The check is whitespace- and case-insensitive: runs of whitespace are
+    collapsed and both strings are lowercased before comparing.  This handles
+    minor line-ending or spacing differences between the LLM's copy and the
+    source text without being so loose that unrelated text matches.
+
+    Returns False for empty strings.
+    """
+    if not original or not original.strip():
+        return False
+    return _normalize_whitespace(original) in _normalize_whitespace(resume_text)
+
+
+def filter_rewrite_suggestions(
+    raw_items: list[Any],
+    missing_skills: list[str],
+    resume_text: str,
+) -> list[dict]:
+    """
+    Clean and validate a list of raw rewrite suggestion dicts from Gemini.
+
+    Rules applied in order:
+    1. Each item must be a dict with keys target_skill, original, suggested, reason.
+       Malformed items are skipped.
+    2. The target_skill (after normalize_skill) must be in the code-computed
+       missing_skills list (also normalized).  Items for skills that are not
+       actually missing — or that the LLM invented — are dropped.
+    3. suggested and reason are truncated to _MAX_SUGGESTION_CHARS characters.
+    4. verify_original is run on the original field.  If it fails (the text
+       was not found in the resume), original is set to "" so the UI can show
+       "Consider adding a bullet like:" instead of a struck-through fabrication.
+    5. The list is capped at 5 items.
+
+    Returns a list of clean dicts: {target_skill, original, suggested, reason}.
+    """
+    # Build a set of normalized missing skill strings for fast O(1) lookup
+    normalized_missing = {normalize_skill(s) for s in missing_skills}
+
+    cleaned: list[dict] = []
+
+    for item in raw_items:
+        # --- shape check ---
+        if not isinstance(item, dict):
+            continue
+        try:
+            target_skill = str(item["target_skill"]).strip()
+            original     = str(item["original"]).strip()
+            suggested    = str(item["suggested"]).strip()
+            reason       = str(item["reason"]).strip()
+        except KeyError:
+            continue  # missing required key — skip
+
+        # --- drop items for skills that aren't actually missing ---
+        if normalize_skill(target_skill) not in normalized_missing:
+            continue
+
+        # --- trim overly long strings ---
+        suggested = suggested[:_MAX_SUGGESTION_CHARS]
+        reason    = reason[:_MAX_SUGGESTION_CHARS]
+
+        # --- original verification: blank it out if not found in resume ---
+        if not verify_original(original, resume_text):
+            original = ""
+
+        cleaned.append({
+            "target_skill": target_skill,
+            "original":     original,
+            "suggested":    suggested,
+            "reason":       reason,
+        })
+
+        if len(cleaned) == 5:
+            break
+
+    return cleaned

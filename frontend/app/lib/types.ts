@@ -15,6 +15,14 @@ export interface SubScores {
   education:  SubScore;
 }
 
+export interface RewriteSuggestion {
+  target_skill: string;
+  /** Empty string means the original could not be verified in the resume. */
+  original:     string;
+  suggested:    string;
+  reason:       string;
+}
+
 export interface AnalysisResult {
   overall_score:            number;
   sub_scores:               SubScores;
@@ -22,6 +30,7 @@ export interface AnalysisResult {
   matched_skills:           string[];
   missing_skills:           string[];
   missing_preferred_skills: string[];
+  rewrite_suggestions:      RewriteSuggestion[];
   feedback:                 string;
   ai_used:                  boolean;
   job_description_text:     string;

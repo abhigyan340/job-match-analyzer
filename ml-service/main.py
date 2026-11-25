@@ -16,8 +16,9 @@ from skills import (
     normalize_skill,
     compute_overall_score,
     _extract_skills_from_text_taxonomy,
+    filter_rewrite_suggestions,
 )
-from feedback import call_gemini_analysis
+from feedback import call_gemini_analysis, generate_rewrite_suggestions
 
 app = FastAPI(title="Job Match Analyzer ML Service")
 
@@ -47,6 +48,13 @@ class SubScores(BaseModel):
     education:  SubScore
 
 
+class RewriteSuggestion(BaseModel):
+    target_skill: str
+    original:     str   # empty string means the original could not be verified
+    suggested:    str
+    reason:       str
+
+
 class AnalyzeResponse(BaseModel):
     overall_score:            float
     sub_scores:               SubScores
@@ -54,6 +62,7 @@ class AnalyzeResponse(BaseModel):
     matched_skills:           list[str]
     missing_skills:           list[str]
     missing_preferred_skills: list[str]
+    rewrite_suggestions:      list[RewriteSuggestion]
     feedback:                 str
     ai_used:                  bool
     job_description_text:     str
@@ -200,7 +209,27 @@ async def analyze(
     )
 
     # ------------------------------------------------------------------
-    # 8. Build and return response
+    # 8. Rewrite suggestions (second Gemini call, only when AI is available
+    #    and there are skills to address — failure returns [] silently)
+    # ------------------------------------------------------------------
+    all_missing = missing + missing_preferred   # required + preferred gaps
+    rewrite_suggestions: list[RewriteSuggestion] = []
+
+    if ai_used and all_missing:
+        raw_suggestions = generate_rewrite_suggestions(
+            resume_text=resume_text,
+            missing_skills=all_missing,
+        )
+        # filter_rewrite_suggestions enforces honesty rules and caps at 5
+        filtered = filter_rewrite_suggestions(
+            raw_items=raw_suggestions,
+            missing_skills=all_missing,
+            resume_text=resume_text,
+        )
+        rewrite_suggestions = [RewriteSuggestion(**s) for s in filtered]
+
+    # ------------------------------------------------------------------
+    # 9. Build and return response
     # ------------------------------------------------------------------
     return AnalyzeResponse(
         overall_score=overall,
@@ -226,6 +255,7 @@ async def analyze(
         matched_skills=matched,
         missing_skills=missing,
         missing_preferred_skills=missing_preferred,
+        rewrite_suggestions=rewrite_suggestions,
         feedback=feedback,
         ai_used=ai_used,
         job_description_text=jd_text,

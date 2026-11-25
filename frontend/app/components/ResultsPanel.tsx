@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import { useState } from "react";
-import type { AnalysisResult, SubScore } from "../lib/types";
+import type { AnalysisResult, SubScore, RewriteSuggestion } from "../lib/types";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -190,6 +190,63 @@ function ScoreFormula() {
 }
 
 // ---------------------------------------------------------------------------
+// Rewrite suggestion card
+// ---------------------------------------------------------------------------
+
+function SuggestionCard({ suggestion }: { suggestion: RewriteSuggestion }) {
+  const [copied, setCopied] = useState(false);
+
+  function handleCopy() {
+    navigator.clipboard.writeText(suggestion.suggested).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  const hasOriginal = suggestion.original.trim().length > 0;
+
+  return (
+    <div className="border border-slate-200 rounded-lg p-4 bg-slate-50 space-y-2">
+      {/* Target skill badge */}
+      <span className="inline-block text-xs font-semibold px-2.5 py-1 rounded-full bg-violet-100 text-violet-800">
+        {suggestion.target_skill}
+      </span>
+
+      {/* Original line — struck through; or the "consider adding" label */}
+      {hasOriginal ? (
+        <p className="text-sm text-slate-400 line-through leading-relaxed">
+          {suggestion.original}
+        </p>
+      ) : (
+        <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">
+          Consider adding a bullet like:
+        </p>
+      )}
+
+      {/* Suggested rewrite */}
+      <p className="text-sm text-slate-800 leading-relaxed font-medium">
+        {suggestion.suggested}
+      </p>
+
+      {/* Reason + copy button row */}
+      <div className="flex items-start justify-between gap-4 pt-1">
+        <p className="text-xs text-slate-500 leading-relaxed flex-1">
+          {suggestion.reason}
+        </p>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="shrink-0 text-xs font-medium px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-400 transition-colors"
+          aria-label={`Copy suggested rewrite for ${suggestion.target_skill}`}
+        >
+          {copied ? "Copied!" : "Copy"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -201,6 +258,7 @@ export default function ResultsPanel({ result }: { result: AnalysisResult }) {
     matched_skills,
     missing_skills,
     missing_preferred_skills,
+    rewrite_suggestions,
     feedback,
     ai_used,
   } = result;
@@ -259,6 +317,21 @@ export default function ResultsPanel({ result }: { result: AnalysisResult }) {
         <div>
           <h3 className="font-medium mb-2">Missing preferred skills</h3>
           <SkillPills skills={missing_preferred_skills} tone="preferred" />
+        </div>
+      )}
+
+      {/* Rewrite suggestions */}
+      {rewrite_suggestions.length > 0 && (
+        <div>
+          <h3 className="font-medium mb-1">Suggested resume improvements</h3>
+          <p className="text-xs text-slate-500 mb-3">
+            Only use suggestions that are true for you.
+          </p>
+          <div className="space-y-3">
+            {rewrite_suggestions.map((s, i) => (
+              <SuggestionCard key={i} suggestion={s} />
+            ))}
+          </div>
         </div>
       )}
 

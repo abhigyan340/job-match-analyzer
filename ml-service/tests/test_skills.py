@@ -20,6 +20,8 @@ from skills import (
     WEIGHT_SEMANTIC,
     WEIGHT_EXPERIENCE,
     WEIGHT_EDUCATION,
+    verify_original,
+    filter_rewrite_suggestions,
 )
 
 
@@ -257,3 +259,194 @@ class TestComputeOverallScore:
             skills=50, semantic=50, experience=50, education=50
         )
         assert isinstance(score, float)
+
+
+# ---------------------------------------------------------------------------
+# verify_original
+# ---------------------------------------------------------------------------
+
+class TestVerifyOriginal:
+    RESUME = (
+        "• Developed REST APIs using Python and FastAPI\n"
+        "• Led a team of 5 engineers to deliver a cloud migration project\n"
+        "• Wrote unit tests with pytest and achieved 90% coverage"
+    )
+
+    def test_exact_match(self):
+        assert verify_original(
+            "Developed REST APIs using Python and FastAPI", self.RESUME
+        )
+
+    def test_case_insensitive(self):
+        # Different capitalisation must still match
+        assert verify_original(
+            "developed rest apis using python and fastapi", self.RESUME
+        )
+
+    def test_extra_whitespace_in_original(self):
+        # Leading/trailing spaces and internal whitespace runs collapsed
+        assert verify_original(
+            "  Developed   REST APIs using Python  and FastAPI  ", self.RESUME
+        )
+
+    def test_extra_whitespace_in_resume(self):
+        resume = "Developed  REST  APIs  using  Python  and  FastAPI"
+        assert verify_original("Developed REST APIs using Python and FastAPI", resume)
+
+    def test_not_found(self):
+        assert not verify_original("Built microservices with Go", self.RESUME)
+
+    def test_empty_original_returns_false(self):
+        assert not verify_original("", self.RESUME)
+
+    def test_whitespace_only_returns_false(self):
+        assert not verify_original("   ", self.RESUME)
+
+    def test_partial_substring_still_matches(self):
+        # A shorter excerpt that IS present in the resume should still match
+        assert verify_original("Led a team of 5 engineers", self.RESUME)
+
+    def test_invented_text_not_found(self):
+        assert not verify_original(
+            "Architected a Kubernetes cluster handling 10M requests/day", self.RESUME
+        )
+
+
+# ---------------------------------------------------------------------------
+# filter_rewrite_suggestions
+# ---------------------------------------------------------------------------
+
+class TestFilterRewriteSuggestions:
+    RESUME = (
+        "• Developed REST APIs using Python and FastAPI\n"
+        "• Led a team of 5 engineers to deliver a cloud migration project\n"
+        "• Wrote unit tests with pytest and achieved 90% coverage"
+    )
+    MISSING = ["docker", "kubernetes"]
+
+    def _make_item(self, target, original, suggested, reason):
+        return {
+            "target_skill": target,
+            "original":     original,
+            "suggested":    suggested,
+            "reason":       reason,
+        }
+
+    def test_valid_item_passes_through(self):
+        items = [self._make_item(
+            "docker",
+            "Developed REST APIs using Python and FastAPI",
+            "Developed and containerized REST APIs using Python, FastAPI, and Docker",
+            "The project involved containerization which maps to Docker.",
+        )]
+        result = filter_rewrite_suggestions(items, self.MISSING, self.RESUME)
+        assert len(result) == 1
+        assert result[0]["target_skill"] == "docker"
+
+    def test_unknown_target_skill_dropped(self):
+        # "golang" is not in MISSING — the item must be dropped
+        items = [self._make_item(
+            "golang",
+            "Developed REST APIs using Python and FastAPI",
+            "Developed REST APIs using Go",
+            "Go is relevant here.",
+        )]
+        result = filter_rewrite_suggestions(items, self.MISSING, self.RESUME)
+        assert result == []
+
+    def test_alias_normalized_target_accepted(self):
+        # "k8s" normalizes to "kubernetes", which IS in MISSING
+        items = [self._make_item(
+            "k8s",
+            "Led a team of 5 engineers to deliver a cloud migration project",
+            "Led a team of 5 engineers to deliver a Kubernetes-based cloud migration",
+            "Cloud migration work maps directly to Kubernetes.",
+        )]
+        result = filter_rewrite_suggestions(items, self.MISSING, self.RESUME)
+        assert len(result) == 1
+        assert result[0]["target_skill"] == "k8s"
+
+    def test_unverifiable_original_blanked(self):
+        # The original text does not appear in the resume — must be set to ""
+        items = [self._make_item(
+            "docker",
+            "Deployed microservices on AWS ECS",   # not in resume
+            "Containerized microservices using Docker and deployed on AWS ECS",
+            "The experience relates to containerization.",
+        )]
+        result = filter_rewrite_suggestions(items, self.MISSING, self.RESUME)
+        assert len(result) == 1
+        assert result[0]["original"] == ""
+
+    def test_verified_original_kept(self):
+        items = [self._make_item(
+            "docker",
+            "Developed REST APIs using Python and FastAPI",
+            "Developed and containerized REST APIs using Python, FastAPI, and Docker",
+            "Direct containerization work.",
+        )]
+        result = filter_rewrite_suggestions(items, self.MISSING, self.RESUME)
+        assert result[0]["original"] == "Developed REST APIs using Python and FastAPI"
+
+    def test_capped_at_five(self):
+        # Provide 7 valid items — only 5 must be returned
+        items = []
+        for i in range(7):
+            items.append(self._make_item(
+                "docker",
+                "Developed REST APIs using Python and FastAPI",
+                f"Suggestion {i}",
+                f"Reason {i}",
+            ))
+        result = filter_rewrite_suggestions(items, self.MISSING, self.RESUME)
+        assert len(result) == 5
+
+    def test_long_suggested_truncated(self):
+        long_text = "x" * 400
+        items = [self._make_item(
+            "docker",
+            "Developed REST APIs using Python and FastAPI",
+            long_text,
+            "Short reason.",
+        )]
+        result = filter_rewrite_suggestions(items, self.MISSING, self.RESUME)
+        assert len(result[0]["suggested"]) == 300
+
+    def test_long_reason_truncated(self):
+        long_reason = "y" * 400
+        items = [self._make_item(
+            "docker",
+            "Developed REST APIs using Python and FastAPI",
+            "Containerized APIs using Docker",
+            long_reason,
+        )]
+        result = filter_rewrite_suggestions(items, self.MISSING, self.RESUME)
+        assert len(result[0]["reason"]) == 300
+
+    def test_malformed_item_skipped(self):
+        items = [
+            "not a dict",
+            {"target_skill": "docker"},   # missing required keys
+            self._make_item(
+                "docker",
+                "Developed REST APIs using Python and FastAPI",
+                "Containerized REST APIs using Docker",
+                "Direct work.",
+            ),
+        ]
+        result = filter_rewrite_suggestions(items, self.MISSING, self.RESUME)
+        assert len(result) == 1
+
+    def test_empty_input_returns_empty(self):
+        assert filter_rewrite_suggestions([], self.MISSING, self.RESUME) == []
+
+    def test_empty_missing_drops_all(self):
+        # If no skills are missing, nothing should pass the target-skill check
+        items = [self._make_item(
+            "docker",
+            "Developed REST APIs using Python and FastAPI",
+            "Added Docker",
+            "Reason.",
+        )]
+        result = filter_rewrite_suggestions(items, [], self.RESUME)
+        assert result == []
