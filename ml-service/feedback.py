@@ -21,7 +21,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Read model name from env so it can be changed without touching code.
-MODEL_NAME: str = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+MODEL_NAME: str = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
 # Build the client once at import time (holds no persistent connection).
 _client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
@@ -163,6 +163,7 @@ def call_gemini_analysis(resume_text: str, jd_text: str) -> tuple[dict, bool]:
     except Exception as first_err:
         err_str = str(first_err)
         is_rate_limit = "429" in err_str or "quota" in err_str.lower()
+        is_not_found  = "404" in err_str or "not found" in err_str.lower()
 
         if is_rate_limit:
             logger.warning("Gemini 429 rate limit — waiting 5 s then retrying once.")
@@ -172,6 +173,12 @@ def call_gemini_analysis(resume_text: str, jd_text: str) -> tuple[dict, bool]:
                 return result, True
             except Exception as retry_err:
                 logger.error("Gemini retry also failed: %s", retry_err)
+        elif is_not_found:
+            logger.error(
+                "Model '%s' is not available. "
+                "Set GEMINI_MODEL in ml-service/.env to a current model.",
+                MODEL_NAME,
+            )
         else:
             logger.error("Gemini call failed: %s", first_err)
 
@@ -278,5 +285,13 @@ def generate_rewrite_suggestions(
         return data
 
     except Exception as err:
-        logger.error("Rewrite suggestions call failed: %s", err)
+        err_str = str(err)
+        if "404" in err_str or "not found" in err_str.lower():
+            logger.error(
+                "Model '%s' is not available. "
+                "Set GEMINI_MODEL in ml-service/.env to a current model.",
+                MODEL_NAME,
+            )
+        else:
+            logger.error("Rewrite suggestions call failed: %s", err)
         return []
