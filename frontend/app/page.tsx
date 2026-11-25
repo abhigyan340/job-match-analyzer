@@ -2,15 +2,7 @@
 
 import { useState } from "react";
 import ResultsPanel from "./components/ResultsPanel";
-
-export interface AnalysisResult {
-  match_score: number;
-  tfidf_score: number;
-  embedding_score: number;
-  matched_skills: string[];
-  missing_skills: string[];
-  feedback: string;
-}
+import type { AnalysisResult } from "./lib/types";
 
 // Which mode the JD input is in
 type JdMode = "paste" | "upload";

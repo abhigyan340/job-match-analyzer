@@ -1,35 +1,21 @@
 """
-Computes resume-vs-JD match scores using two approaches:
-1. TF-IDF + cosine similarity (classical baseline)
-2. Sentence embeddings + cosine similarity (semantic match, primary score)
+Computes resume-vs-JD similarity scores using two approaches:
+1. TF-IDF cosine similarity  — classical keyword-overlap baseline (diagnostic).
+2. Sentence-embedding cosine similarity — semantic match, used in overall score.
 
-Also does lightweight skill extraction against a curated skills list.
+Skill extraction using the taxonomy fallback lives in skills.py.
 """
 
-import re
 from functools import lru_cache
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
 
-# A small starter skills taxonomy. Expand this with a real skills dataset
-# (e.g. O*NET, LinkedIn Skills, or a scraped list) for production use.
-SKILLS_TAXONOMY = {
-    "python", "java", "javascript", "typescript", "c++", "sql", "r",
-    "machine learning", "deep learning", "nlp", "computer vision",
-    "pytorch", "tensorflow", "scikit-learn", "pandas", "numpy",
-    "react", "next.js", "node.js", "fastapi", "django", "flask",
-    "docker", "kubernetes", "aws", "gcp", "azure", "git",
-    "postgresql", "mongodb", "redis", "supabase", "firebase",
-    "rest api", "graphql", "microservices", "ci/cd", "agile",
-    "data analysis", "data engineering", "mlops", "llm", "rag",
-}
-
 
 @lru_cache(maxsize=1)
 def get_embedding_model() -> SentenceTransformer:
-    # Loaded once and cached — this is the slow part, so don't reload per-request
+    # Loaded once and cached — model download/load is slow; don't repeat it
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 
@@ -49,17 +35,6 @@ def compute_embedding_score(resume_text: str, job_description: str) -> float:
 
 def compute_match_score(resume_text: str, job_description: str) -> dict:
     return {
-        "tfidf_score": compute_tfidf_score(resume_text, job_description),
+        "tfidf_score":     compute_tfidf_score(resume_text, job_description),
         "embedding_score": compute_embedding_score(resume_text, job_description),
     }
-
-
-def extract_skills(text: str) -> set[str]:
-    text_lower = text.lower()
-    found = set()
-    for skill in SKILLS_TAXONOMY:
-        # word-boundary-ish match so "r" doesn't match inside "director"
-        pattern = r"(?<![a-z0-9])" + re.escape(skill) + r"(?![a-z0-9])"
-        if re.search(pattern, text_lower):
-            found.add(skill)
-    return found

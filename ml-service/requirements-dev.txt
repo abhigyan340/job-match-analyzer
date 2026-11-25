@@ -1,0 +1,2 @@
+# Development-only dependencies — do not add to requirements.txt
+pytest==8.3.3

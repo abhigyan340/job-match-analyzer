@@ -1,6 +1,6 @@
 """
 AI Job Match Analyzer - ML Microservice
-POST /analyze  — accepts a resume file plus either pasted JD text or a JD file.
+POST /analyze  — resume + JD (pasted text or uploaded file) → full analysis.
 GET  /health   — liveness probe.
 """
 
@@ -10,8 +10,14 @@ from pydantic import BaseModel
 from typing import Optional
 
 from parsing import extract_text_from_file
-from scoring import compute_match_score, extract_skills
-from feedback import generate_feedback
+from scoring import compute_match_score
+from skills import (
+    match_skills,
+    normalize_skill,
+    compute_overall_score,
+    _extract_skills_from_text_taxonomy,
+)
+from feedback import call_gemini_analysis
 
 app = FastAPI(title="Job Match Analyzer ML Service")
 
@@ -25,14 +31,37 @@ app.add_middleware(
 )
 
 
-class AnalyzeResponse(BaseModel):
-    match_score: float
-    tfidf_score: float
-    embedding_score: float
-    matched_skills: list[str]
-    missing_skills: list[str]
-    feedback: str
+# ---------------------------------------------------------------------------
+# Response models (mirror the TypeScript types in frontend/app/lib/types.ts)
+# ---------------------------------------------------------------------------
 
+class SubScore(BaseModel):
+    score: Optional[float]
+    explanation: str
+
+
+class SubScores(BaseModel):
+    skills:     SubScore
+    semantic:   SubScore
+    experience: SubScore
+    education:  SubScore
+
+
+class AnalyzeResponse(BaseModel):
+    overall_score:            float
+    sub_scores:               SubScores
+    tfidf_score:              float
+    matched_skills:           list[str]
+    missing_skills:           list[str]
+    missing_preferred_skills: list[str]
+    feedback:                 str
+    ai_used:                  bool
+    job_description_text:     str
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/health")
 def health():
@@ -41,20 +70,19 @@ def health():
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(
-    resume_file: UploadFile = File(...),
-    job_description: Optional[str] = Form(default=None),
-    jd_file: Optional[UploadFile] = File(default=None),
+    resume_file:     UploadFile          = File(...),
+    job_description: Optional[str]       = Form(default=None),
+    jd_file:         Optional[UploadFile] = File(default=None),
 ):
     """
-    Accepts a resume file (PDF or DOCX) plus EITHER a pasted job_description
-    string OR an uploaded jd_file (PDF or DOCX).
-
-    If both jd_file and job_description are provided, jd_file takes priority.
+    Accepts a resume (PDF/DOCX) plus EITHER a pasted job_description string
+    OR an uploaded jd_file (PDF/DOCX). If both arrive, jd_file takes priority.
+    Returns the full analysis response defined in AnalyzeResponse.
     """
 
-    # --- Parse resume ---
-    # Use the file extension to decide the parser, NOT content_type.
-    # Windows browsers send inconsistent MIME types for the same file.
+    # ------------------------------------------------------------------
+    # 1. Parse resume
+    # ------------------------------------------------------------------
     resume_bytes = await resume_file.read()
     try:
         resume_text = extract_text_from_file(
@@ -70,11 +98,12 @@ async def analyze(
                    "Make sure the PDF/DOCX contains selectable text.",
         )
 
-    # --- Parse job description ---
+    # ------------------------------------------------------------------
+    # 2. Parse job description
+    # ------------------------------------------------------------------
     jd_text: str = ""
 
     if jd_file is not None:
-        # Uploaded JD file takes priority over pasted text
         jd_bytes = await jd_file.read()
         try:
             jd_text = extract_text_from_file(
@@ -94,36 +123,110 @@ async def analyze(
     else:
         raise HTTPException(
             status_code=400,
-            detail="A job description is required. "
-                   "Either paste text into the job_description field "
+            detail="A job description is required. Paste text into job_description "
                    "or upload a file via jd_file.",
         )
 
-    # --- Score + skills ---
+    # ------------------------------------------------------------------
+    # 3. Similarity scores (always computed, never depend on Gemini)
+    # ------------------------------------------------------------------
     scores = compute_match_score(resume_text, jd_text)
-    resume_skills = extract_skills(resume_text)
-    jd_skills = extract_skills(jd_text)
+    semantic_score: float = scores["embedding_score"]
+    tfidf_score:    float = scores["tfidf_score"]
 
-    matched_skills = sorted(resume_skills & jd_skills)
-    missing_skills = sorted(jd_skills - resume_skills)
+    # ------------------------------------------------------------------
+    # 4. Gemini structured extraction (with fallback)
+    # ------------------------------------------------------------------
+    gemini_result, ai_used = call_gemini_analysis(resume_text, jd_text)
 
-    # --- Feedback (Gemini) ---
-    try:
-        feedback = generate_feedback(
-            resume_text=resume_text,
-            job_description=jd_text,
-            matched_skills=matched_skills,
-            missing_skills=missing_skills,
-            match_score=scores["embedding_score"],
+    if ai_used:
+        # Gemini returned skill lists — use them for matching
+        required_skills  = gemini_result["required_skills"]
+        preferred_skills = gemini_result["preferred_skills"]
+        resume_skills    = gemini_result["resume_skills"]
+
+        exp_data = gemini_result["experience"]
+        edu_data = gemini_result["education"]
+        experience_score: Optional[float] = float(exp_data["score"])
+        education_score:  Optional[float] = float(edu_data["score"])
+        experience_explanation = exp_data["explanation"]
+        education_explanation  = edu_data["explanation"]
+        feedback = gemini_result["feedback"]
+    else:
+        # Fallback: use the taxonomy extractor for skills
+        taxonomy_resume = _extract_skills_from_text_taxonomy(resume_text)
+        taxonomy_jd     = _extract_skills_from_text_taxonomy(jd_text)
+
+        required_skills  = sorted(taxonomy_jd)
+        preferred_skills = []
+        resume_skills    = sorted(taxonomy_resume)
+
+        experience_score = None
+        education_score  = None
+        experience_explanation = "Not available (AI analysis unavailable)"
+        education_explanation  = "Not available (AI analysis unavailable)"
+        feedback = gemini_result["feedback"]  # "AI feedback is temporarily unavailable."
+
+    # ------------------------------------------------------------------
+    # 5. Skill matching (always done in code, never by the LLM)
+    # ------------------------------------------------------------------
+    matched, missing = match_skills(required_skills, resume_skills, resume_text)
+
+    # Preferred skills: missing ones the resume doesn't cover
+    _, missing_preferred = match_skills(preferred_skills, resume_skills, resume_text)
+
+    # ------------------------------------------------------------------
+    # 6. Skills sub-score
+    # ------------------------------------------------------------------
+    if required_skills:
+        skills_score: Optional[float] = round(
+            len(matched) / len(required_skills) * 100, 1
         )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Feedback generation failed: {e}")
+        skills_explanation = (
+            f"Matched {len(matched)} of {len(required_skills)} required skills"
+        )
+    else:
+        skills_score = None
+        skills_explanation = "No required skills listed in the job description"
 
+    # ------------------------------------------------------------------
+    # 7. Overall score (weighted, drops None components and re-normalizes)
+    # ------------------------------------------------------------------
+    overall = compute_overall_score(
+        skills=skills_score,
+        semantic=semantic_score,
+        experience=experience_score,
+        education=education_score,
+    )
+
+    # ------------------------------------------------------------------
+    # 8. Build and return response
+    # ------------------------------------------------------------------
     return AnalyzeResponse(
-        match_score=scores["embedding_score"],
-        tfidf_score=scores["tfidf_score"],
-        embedding_score=scores["embedding_score"],
-        matched_skills=matched_skills,
-        missing_skills=missing_skills,
+        overall_score=overall,
+        sub_scores=SubScores(
+            skills=SubScore(
+                score=skills_score,
+                explanation=skills_explanation,
+            ),
+            semantic=SubScore(
+                score=round(semantic_score, 1),
+                explanation="Embedding similarity of the full resume vs job description",
+            ),
+            experience=SubScore(
+                score=experience_score,
+                explanation=experience_explanation,
+            ),
+            education=SubScore(
+                score=education_score,
+                explanation=education_explanation,
+            ),
+        ),
+        tfidf_score=round(tfidf_score, 1),
+        matched_skills=matched,
+        missing_skills=missing,
+        missing_preferred_skills=missing_preferred,
         feedback=feedback,
+        ai_used=ai_used,
+        job_description_text=jd_text,
     )
